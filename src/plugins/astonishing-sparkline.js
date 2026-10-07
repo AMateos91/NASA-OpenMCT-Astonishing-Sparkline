@@ -24,11 +24,11 @@ export default function astonishingSparkline(options = {}) {
               .astonishing-sparkline-container {
                   position: relative;
                   width: 100%;
-                  max-width: 500px;     
+                  /* max-width: 500px; */   
                   height: 220px;        
                   box-sizing: border-box;
                   padding: 8px;
-                  margin: 6px;
+                  margin: 0px;
                   overflow: hidden;
                   background: rgba(0, 0, 0, 0.2); 
                   border-radius: 4px;
