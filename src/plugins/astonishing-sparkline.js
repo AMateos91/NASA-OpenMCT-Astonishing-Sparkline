@@ -230,8 +230,9 @@ export default function astonishingSparkline(options = {}) {
 
           const valueRange = max - min;
 
-          const firstSampleTime = samples[0].timestamp;
-          const lastSampleTime = samples[samples.length - 1].timestamp;
+          const bounds = timeContext.getBounds(); 
+          const firstSampleTime = bounds.start;   
+          const lastSampleTime = bounds.end;     
           const timeRange = lastSampleTime - firstSampleTime || 1;
           // Subtle background gradient.
           const gradient = ctx.createLinearGradient(0, 0, 0, height);
