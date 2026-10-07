@@ -1,428 +1,1717 @@
 // Astonishing Sparkline plugin for Open MCT
 //
-// Provides a lightweight, event-driven canvas sparkline for numeric telemetry.
+// A simple, real-sample telemetry sparkline.
 //
-// The view:
-//   - Uses the Open MCT Time API to obtain the view's TimeContext.
-//   - Uses TelemetryCollection so historical telemetry is fetched on load and
-//     realtime telemetry is subscribed to automatically.
-//   - Uses telemetry metadata to identify the first range value and its formatter.
-//   - Re-renders only when telemetry, the time window, or the canvas size changes.
+// Design:
+//   - Historical data: openmct.telemetry.request()
+//   - Realtime data:   openmct.telemetry.subscribe()
+//   - Actual telemetry samples are stored in a timestamp-keyed buffer.
+//   - Duplicate timestamps are replaced, not drawn twice.
+//   - Samples are always sorted chronologically before rendering.
+//   - X axis = current Open MCT TimeContext.
+//   - Y axis = telemetry metadata min/max.
+//   - No minmax strategy.
+//   - No TelemetryCollection.
+//   - No dynamic Y-axis rescaling.
+//   - No arbitrary removal of the left side of the waveform.
 
 export default function astonishingSparkline(options = {}) {
-  const maxSamples = Math.max(2, Number(options.maxSamples) || 300);
-  const bgColor = options.bgColor || "#0b1020";
-  const lineColor = options.lineColor || "#00e0a3";
-  const lineWidth = options.lineWidth || 2;
+    const maxSamples = Math.max(
+        500,
+        Number(options.maxSamples) || 10000
+    );
 
-  return function install(openmct) {
-    if (!document.getElementById("astonishing-sparkline-styles")) {
-      const styleTag = document.createElement("style");
-      styleTag.id = "astonishing-sparkline-styles";
+    const bgColor =
+        options.bgColor || "#07131a";
 
-      styleTag.textContent = `
-              .astonishing-sparkline-container {
-                  position: relative;
-                  width: 100%;
-                  /* max-width: 500px; */   
-                  height: 220px;        
-                  box-sizing: border-box;
-                  padding: 8px;
-                  margin: 0px;
-                  overflow: hidden;
-                  background: rgba(0, 0, 0, 0.2); 
-                  border-radius: 4px;
-              }
-              .astonishing-sparkline-header {
-                  font-family: sans-serif;
-                  font-size: 12px;
-                  color: #cccccc;
-                  margin-bottom: 6px;
-                  height: 16px;
-                  text-transform: uppercase;
-                  letter-spacing: 0.5px;
-              }
-              .astonishing-sparkline-canvas {
-                  display: block;
-                  width: 100%;
-                  height: calc(100% - 22px); 
-              }
-          `;
+    const lineColor =
+        options.lineColor || "#00e0a3";
 
-      document.head.appendChild(styleTag);
-    }
+    const lineWidth =
+        Number(options.lineWidth) > 0
+            ? Number(options.lineWidth)
+            : 2;
 
-    openmct.objectViews.addProvider({
-      key: "astonishing.sparkline",
-      name: "Astonishing Sparkline",
+    return function install(openmct) {
+        /*
+         * ------------------------------------------------------------
+         * CSS
+         * ------------------------------------------------------------
+         */
 
-      canView(domainObject) {
-        return Boolean(openmct.telemetry.getMetadata(domainObject));
-      },
+        if (
+            !document.getElementById(
+                "astonishing-sparkline-styles"
+            )
+        ) {
+            const style =
+                document.createElement("style");
 
-      view(domainObject, objectPath) {
-        let containerEl = null;
-        let canvas = null;
-        let ctx = null;
+            style.id =
+                "astonishing-sparkline-styles";
 
-        let timeContext = null;
-        let telemetryCollection = null;
+            style.textContent = `
+                .astonishing-sparkline-container {
+                    position: relative;
 
-        let metadata = null;
-        let formatMap = null;
-        let rangeMetadata = null;
+                    width: 100%;
+                    height: 220px;
 
-        let destroyed = false;
-        let renderFrame = null;
-        let dpr = 1;
+                    box-sizing: border-box;
 
-        function getRangeFormatter() {
-          if (!rangeMetadata || !formatMap) {
-            return null;
-          }
+                    padding: 8px;
+                    margin: 0;
 
-          return formatMap[rangeMetadata.key];
-        }
+                    overflow: hidden;
 
-        function updateMetadata() {
-          metadata = openmct.telemetry.getMetadata(domainObject);
+                    background: rgba(0, 0, 0, 0.20);
 
-          if (!metadata) {
-            rangeMetadata = null;
-            formatMap = null;
-            return;
-          }
+                    border-radius: 4px;
+                }
 
-          // The first range value is the telemetry value intended for
-          // plotting on the Y axis.
-          rangeMetadata = metadata.valuesForHints(["range"])[0];
+                .astonishing-sparkline-header {
+                    width: 100%;
+                    height: 16px;
 
-          if (!rangeMetadata) {
-            formatMap = null;
-            return;
-          }
+                    margin: 0 0 6px 0;
+                    padding: 0;
 
-          formatMap = openmct.telemetry.getFormatMap(metadata);
-        }
+                    box-sizing: border-box;
 
-        function resizeCanvas() {
-          if (!canvas || !containerEl || !ctx) {
-            return;
-          }
+                    font-family: sans-serif;
+                    font-size: 12px;
+                    line-height: 16px;
 
-          const rect = containerEl.getBoundingClientRect();
+                    color: #cccccc;
 
-          dpr = window.devicePixelRatio || 1;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
 
-          canvas.width = Math.max(2, Math.floor(rect.width * dpr));
-          canvas.height = Math.max(2, Math.floor(rect.height * dpr));
+                    overflow: hidden;
+                    white-space: nowrap;
+                    text-overflow: ellipsis;
+                }
 
-          canvas.style.width = `${rect.width}px`;
-          canvas.style.height = `${rect.height}px`;
+                .astonishing-sparkline-canvas {
+                    display: block;
 
-          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    width: 100%;
+                    height: calc(100% - 22px);
 
-          requestRender();
-        }
+                    margin: 0;
+                    padding: 0;
+                }
+            `;
 
-        function getSamples() {
-          if (!telemetryCollection || !timeContext) {
-            return [];
-          }
-
-          const rangeFormatter = getRangeFormatter();
-
-          if (!rangeFormatter) {
-            return [];
-          }
-
-          const timeSystem = timeContext.getTimeSystem();
-
-          if (!timeSystem) {
-            return [];
-          }
-
-          /*
-           * Telemetry metadata must contain a value whose key matches the
-           * active time system. This is how Open MCT maps a telemetry datum
-           * onto the global time context.
-           */
-          const timeMetadata = metadata.value(timeSystem.key);
-
-          if (!timeMetadata) {
-            return [];
-          }
-
-          const timeFormatter = formatMap[timeMetadata.key];
-
-          if (!timeFormatter) {
-            return [];
-          }
-
-          const samples = [];
-
-          telemetryCollection.getAll().forEach((datum) => {
-            const timestamp = timeFormatter.parse(datum);
-            let value = rangeFormatter.parse(datum);
-
-            // A range value can technically be an array. A sparkline
-            // represents a single numeric series, so use the first value.
-            if (Array.isArray(value)) {
-              value = value[0];
-            }
-
-            if (
-              typeof timestamp === "number" &&
-              Number.isFinite(timestamp) &&
-              typeof value === "number" &&
-              Number.isFinite(value)
-            ) {
-              samples.push({
-                timestamp,
-                value,
-              });
-            }
-          });
-
-          // TelemetryCollection keeps data sorted by time. Limit the amount
-          // rendered without changing the collection itself.
-          return samples.slice(-maxSamples);
-        }
-
-        function render() {
-          renderFrame = null;
-
-          if (destroyed || !ctx || !canvas || !timeContext) {
-            return;
-          }
-
-          const width = canvas.width / dpr;
-          const height = canvas.height / dpr;
-
-          ctx.clearRect(0, 0, width, height);
-
-          ctx.fillStyle = bgColor;
-          ctx.fillRect(0, 0, width, height);
-
-          const samples = getSamples();
-
-          if (samples.length < 2) {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
-            ctx.fillRect(0, 0, width, height);
-            return;
-          }
-
-          const values = samples.map((sample) => sample.value);
-
-          let min = Math.min(...values);
-          let max = Math.max(...values);
-
-          /*
-           * Prefer the actual displayed data range. Metadata min/max describes
-           * the telemetry domain, but using the current values keeps the
-           * sparkline readable when the telemetry occupies a small portion
-           * of that domain.
-           */
-          if (min === max) {
-            min -= 1;
-            max += 1;
-          }
-
-          const valueRange = max - min;
-
-          const bounds = timeContext.getBounds(); 
-          const firstSampleTime = bounds.start;   
-          const lastSampleTime = bounds.end;     
-          const timeRange = lastSampleTime - firstSampleTime || 1;
-          // Subtle background gradient.
-          const gradient = ctx.createLinearGradient(0, 0, 0, height);
-          gradient.addColorStop(0, "rgba(0, 240, 163, 0.06)");
-          gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-
-          ctx.fillStyle = gradient;
-          ctx.fillRect(0, 0, width, height);
-
-          ctx.beginPath();
-
-          samples.forEach((sample, index) => {
-            const normalizedX =
-              (sample.timestamp - firstSampleTime) / timeRange;
-            const normalizedY = (sample.value - min) / valueRange;
-
-            const x = Math.max(0, Math.min(width, normalizedX * width));
-            const y = height - normalizedY * height;
-
-            if (index === 0) {
-              ctx.moveTo(x, y);
-            } else {
-              ctx.lineTo(x, y);
-            }
-          });
-
-          ctx.lineWidth = lineWidth;
-          ctx.strokeStyle = lineColor;
-          ctx.lineJoin = "round";
-          ctx.lineCap = "round";
-          ctx.stroke();
-
-          // Small glow effect.
-          ctx.save();
-          ctx.globalCompositeOperation = "lighter";
-          ctx.strokeStyle = lineColor;
-          ctx.lineWidth = lineWidth * 5;
-          ctx.globalAlpha = 0.05;
-          ctx.stroke();
-          ctx.restore();
+            document.head.appendChild(style);
         }
 
         /*
-         * This is deliberately NOT a render loop.
-         *
-         * Rendering is scheduled only because something changed:
-         *   - telemetry collection emitted an event,
-         *   - the time system changed,
-         *   - the canvas was resized.
-         *
-         * requestAnimationFrame is used only to coalesce multiple events
-         * arriving during the same browser frame.
+         * ------------------------------------------------------------
+         * Object View Provider
+         * ------------------------------------------------------------
          */
-        function requestRender() {
-          if (destroyed || renderFrame !== null) {
-            return;
-          }
 
-          renderFrame = window.requestAnimationFrame(render);
-        }
+        openmct.objectViews.addProvider({
+            key: "astonishing.sparkline",
 
-        function telemetryChanged() {
-          requestRender();
-        }
+            name: "Astonishing Sparkline",
 
-        function timeSystemChanged() {
-          // The TelemetryCollection handles the actual historical reload.
-          // We only need to refresh the metadata/formatter used for drawing.
-          updateMetadata();
-          requestRender();
-        }
+            canView(domainObject) {
+                const metadata =
+                    openmct.telemetry.getMetadata(
+                        domainObject
+                    );
 
-        return {
-          show(el) {
-            destroyed = false;
+                if (!metadata) {
+                    return false;
+                }
 
-            /*
-             * Each Open MCT view gets its own TimeContext. This keeps the
-             * sparkline synchronized with the global Time Conductor without
-             * maintaining an independent time range.
-             */
-            timeContext = openmct.time.getContextForView(objectPath);
+                if (
+                    typeof metadata.valuesForHints !==
+                    "function"
+                ) {
+                    return false;
+                }
 
-            updateMetadata();
+                return Boolean(
+                    metadata.valuesForHints([
+                        "range"
+                    ])[0]
+                );
+            },
 
-            if (!rangeMetadata) {
-              throw new Error(
-                `Astonishing Sparkline requires a telemetry value with a "range" hint for ${domainObject.name}.`,
-              );
+            view(domainObject, objectPath) {
+                /*
+                 * --------------------------------------------------------
+                 * DOM
+                 * --------------------------------------------------------
+                 */
+
+                let containerEl = null;
+                let canvas = null;
+                let ctx = null;
+
+                /*
+                 * --------------------------------------------------------
+                 * Open MCT time state
+                 * --------------------------------------------------------
+                 */
+
+                let timeContext = null;
+
+                /*
+                 * --------------------------------------------------------
+                 * Telemetry state
+                 * --------------------------------------------------------
+                 */
+
+                let metadata = null;
+                let formatMap = null;
+
+                let rangeMetadata = null;
+                let timeMetadata = null;
+
+                let unsubscribe = null;
+
+                /*
+                 * --------------------------------------------------------
+                 * Sample buffer
+                 * --------------------------------------------------------
+                 *
+                 * Map:
+                 *
+                 *     timestamp -> value
+                 *
+                 * This eliminates duplicate historical/realtime points.
+                 */
+
+                const samplesByTime =
+                    new Map();
+
+                /*
+                 * --------------------------------------------------------
+                 * Request state
+                 * --------------------------------------------------------
+                 */
+
+                let requestInProgress = false;
+                let requestSerial = 0;
+
+                /*
+                 * The buffer covers this interval.
+                 *
+                 * These values refer to telemetry data actually requested,
+                 * not merely the currently visible canvas.
+                 */
+
+                let loadedStart = null;
+                let loadedEnd = null;
+
+                /*
+                 * --------------------------------------------------------
+                 * Rendering state
+                 * --------------------------------------------------------
+                 */
+
+                let destroyed = false;
+                let renderFrame = null;
+                let resizeObserver = null;
+
+                /*
+                 * --------------------------------------------------------
+                 * Stable Y axis
+                 * --------------------------------------------------------
+                 */
+
+                let yMin = null;
+                let yMax = null;
+
+                /*
+                 * --------------------------------------------------------
+                 * Metadata
+                 * --------------------------------------------------------
+                 */
+
+                function updateMetadata() {
+                    metadata =
+                        openmct.telemetry.getMetadata(
+                            domainObject
+                        );
+
+                    formatMap = null;
+                    rangeMetadata = null;
+                    timeMetadata = null;
+
+                    if (!metadata) {
+                        return;
+                    }
+
+                    if (
+                        typeof metadata.valuesForHints !==
+                        "function"
+                    ) {
+                        return;
+                    }
+
+                    rangeMetadata =
+                        metadata.valuesForHints([
+                            "range"
+                        ])[0] || null;
+
+                    if (!rangeMetadata) {
+                        return;
+                    }
+
+                    formatMap =
+                        openmct.telemetry.getFormatMap(
+                            metadata
+                        );
+
+                    if (!timeContext) {
+                        return;
+                    }
+
+                    const timeSystem =
+                        timeContext.getTimeSystem();
+
+                    if (!timeSystem) {
+                        return;
+                    }
+
+                    if (
+                        typeof metadata.value ===
+                        "function"
+                    ) {
+                        timeMetadata =
+                            metadata.value(
+                                timeSystem.key
+                            ) || null;
+                    }
+
+                    /*
+                     * Use the telemetry definition's physical limits.
+                     *
+                     * For a sine generator this should normally be:
+                     *
+                     *     -amplitude ... +amplitude
+                     *
+                     * Therefore the graph never "breathes" vertically.
+                     */
+
+                    const min =
+                        Number(
+                            rangeMetadata.min
+                        );
+
+                    const max =
+                        Number(
+                            rangeMetadata.max
+                        );
+
+                    if (
+                        Number.isFinite(min) &&
+                        Number.isFinite(max) &&
+                        max > min
+                    ) {
+                        yMin = min;
+                        yMax = max;
+                    }
+                }
+
+                function getRangeFormatter() {
+                    if (
+                        !rangeMetadata ||
+                        !formatMap
+                    ) {
+                        return null;
+                    }
+
+                    return (
+                        formatMap[
+                            rangeMetadata.key
+                        ] || null
+                    );
+                }
+
+                function getTimeFormatter() {
+                    if (
+                        !timeMetadata ||
+                        !formatMap
+                    ) {
+                        return null;
+                    }
+
+                    return (
+                        formatMap[
+                            timeMetadata.key
+                        ] || null
+                    );
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Parse a telemetry datum
+                 * --------------------------------------------------------
+                 */
+
+                function parseDatum(datum) {
+                    const timeFormatter =
+                        getTimeFormatter();
+
+                    const rangeFormatter =
+                        getRangeFormatter();
+
+                    if (
+                        !timeFormatter ||
+                        !rangeFormatter
+                    ) {
+                        return null;
+                    }
+
+                    let timestamp;
+                    let value;
+
+                    try {
+                        timestamp =
+                            timeFormatter.parse(
+                                datum
+                            );
+
+                        value =
+                            rangeFormatter.parse(
+                                datum
+                            );
+                    } catch (error) {
+                        return null;
+                    }
+
+                    if (Array.isArray(value)) {
+                        value = value[0];
+                    }
+
+                    if (
+                        !Number.isFinite(
+                            timestamp
+                        ) ||
+                        !Number.isFinite(value)
+                    ) {
+                        return null;
+                    }
+
+                    return {
+                        timestamp,
+                        value
+                    };
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Add telemetry to our buffer
+                 * --------------------------------------------------------
+                 */
+
+                function addDatum(datum) {
+                    const sample =
+                        parseDatum(datum);
+
+                    if (!sample) {
+                        return false;
+                    }
+
+                    /*
+                     * If the same timestamp is received again, the newest
+                     * value wins.
+                     *
+                     * This is important when historical data overlaps
+                     * realtime data.
+                     */
+                    samplesByTime.set(
+                        sample.timestamp,
+                        sample.value
+                    );
+
+                    return true;
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Convert buffer to ordered samples
+                 * --------------------------------------------------------
+                 */
+
+                function getOrderedSamples() {
+                    const samples = [];
+
+                    samplesByTime.forEach(
+                        (value, timestamp) => {
+                            samples.push({
+                                timestamp,
+                                value
+                            });
+                        }
+                    );
+
+                    samples.sort(
+                        (a, b) =>
+                            a.timestamp -
+                            b.timestamp
+                    );
+
+                    return samples;
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Buffer maintenance
+                 * --------------------------------------------------------
+                 */
+
+                function pruneBuffer(
+                    visibleStart,
+                    visibleEnd
+                ) {
+                    if (
+                        !Number.isFinite(
+                            visibleStart
+                        ) ||
+                        !Number.isFinite(
+                            visibleEnd
+                        ) ||
+                        visibleEnd <=
+                            visibleStart
+                    ) {
+                        return;
+                    }
+
+                    /*
+                     * Keep two complete visible-window widths behind the
+                     * current window.
+                     *
+                     * This prevents unnecessary reloads while a realtime
+                     * window is slowly moving forward.
+                     */
+                    const span =
+                        visibleEnd -
+                        visibleStart;
+
+                    const keepFrom =
+                        visibleStart -
+                        span * 2;
+
+                    /*
+                     * Do not allow the buffer to grow without bound.
+                     */
+                    const timestamps =
+                        Array.from(
+                            samplesByTime.keys()
+                        );
+
+                    if (
+                        timestamps.length <=
+                        maxSamples * 2
+                    ) {
+                        timestamps.forEach(
+                            (timestamp) => {
+                                if (
+                                    timestamp <
+                                    keepFrom
+                                ) {
+                                    samplesByTime.delete(
+                                        timestamp
+                                    );
+                                }
+                            }
+                        );
+
+                        return;
+                    }
+
+                    /*
+                     * Hard upper bound.
+                     *
+                     * Remove the oldest samples first.
+                     */
+                    timestamps.sort(
+                        (a, b) => a - b
+                    );
+
+                    const excess =
+                        timestamps.length -
+                        maxSamples * 2;
+
+                    for (
+                        let i = 0;
+                        i < excess;
+                        i += 1
+                    ) {
+                        samplesByTime.delete(
+                            timestamps[i]
+                        );
+                    }
+
+                    timestamps.forEach(
+                        (timestamp) => {
+                            if (
+                                timestamp <
+                                keepFrom
+                            ) {
+                                samplesByTime.delete(
+                                    timestamp
+                                );
+                            }
+                        }
+                    );
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Determine whether historical data is already available
+                 * --------------------------------------------------------
+                 */
+
+                function bufferContains(
+                    start,
+                    end
+                ) {
+                    if (
+                        loadedStart === null ||
+                        loadedEnd === null
+                    ) {
+                        return false;
+                    }
+
+                    return (
+                        start >= loadedStart &&
+                        end <= loadedEnd
+                    );
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Historical telemetry
+                 * --------------------------------------------------------
+                 */
+
+                async function requestHistorical(
+                    force = false
+                ) {
+                    if (
+                        destroyed ||
+                        !timeContext
+                    ) {
+                        return;
+                    }
+
+                    const bounds =
+                        timeContext.getBounds();
+
+                    if (
+                        !bounds ||
+                        !Number.isFinite(
+                            bounds.start
+                        ) ||
+                        !Number.isFinite(
+                            bounds.end
+                        ) ||
+                        bounds.end <=
+                            bounds.start
+                    ) {
+                        return;
+                    }
+
+                    /*
+                     * If our buffer already covers the visible interval,
+                     * there is nothing to request.
+                     */
+                    if (
+                        !force &&
+                        bufferContains(
+                            bounds.start,
+                            bounds.end
+                        )
+                    ) {
+                        requestRender();
+                        return;
+                    }
+
+                    /*
+                     * Do not launch a pile of identical requests while
+                     * Open MCT's realtime clock is ticking.
+                     */
+                    if (requestInProgress) {
+                        requestRender();
+                        return;
+                    }
+
+                    const timeSystem =
+                        timeContext.getTimeSystem();
+
+                    if (!timeSystem) {
+                        return;
+                    }
+
+                    const timeFormatter =
+                        getTimeFormatter();
+
+                    const rangeFormatter =
+                        getRangeFormatter();
+
+                    if (
+                        !timeFormatter ||
+                        !rangeFormatter
+                    ) {
+                        return;
+                    }
+
+                    requestInProgress =
+                        true;
+
+                    const serial =
+                        ++requestSerial;
+
+                    const start =
+                        bounds.start;
+
+                    const end =
+                        bounds.end;
+
+                    try {
+                        /*
+                         * IMPORTANT:
+                         *
+                         * We deliberately make a normal telemetry request.
+                         *
+                         * No:
+                         *
+                         *     strategy: "minmax"
+                         *
+                         * No:
+                         *
+                         *     size: ...
+                         *
+                         * The provider gives us the actual telemetry
+                         * samples.
+                         */
+                        const data =
+                            await openmct.telemetry.request(
+                                domainObject,
+                                {
+                                    start,
+                                    end,
+                                    domain:
+                                        timeSystem.key
+                                }
+                            );
+
+                        /*
+                         * A newer request may have been issued while this
+                         * one was in flight.
+                         */
+                        if (
+                            destroyed ||
+                            serial !==
+                                requestSerial
+                        ) {
+                            return;
+                        }
+
+                        if (
+                            Array.isArray(data)
+                        ) {
+                            for (
+                                let i = 0;
+                                i < data.length;
+                                i += 1
+                            ) {
+                                addDatum(
+                                    data[i]
+                                );
+                            }
+                        }
+
+                        /*
+                         * Only claim coverage for the request that actually
+                         * completed.
+                         */
+                        loadedStart =
+                            loadedStart === null
+                                ? start
+                                : Math.min(
+                                      loadedStart,
+                                      start
+                                  );
+
+                        loadedEnd =
+                            loadedEnd === null
+                                ? end
+                                : Math.max(
+                                      loadedEnd,
+                                      end
+                                  );
+
+                        pruneBuffer(
+                            start,
+                            end
+                        );
+
+                        requestRender();
+                    } catch (error) {
+                        /*
+                         * Do not destroy the view because a historical
+                         * provider temporarily failed.
+                         */
+                        if (
+                            !destroyed &&
+                            serial ===
+                                requestSerial
+                        ) {
+                            console.error(
+                                "Astonishing Sparkline historical telemetry request failed:",
+                                error
+                            );
+                        }
+                    } finally {
+                        if (
+                            serial ===
+                            requestSerial
+                        ) {
+                            requestInProgress =
+                                false;
+                        }
+                    }
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Realtime subscription
+                 * --------------------------------------------------------
+                 */
+
+                function subscribeRealtime() {
+                    if (
+                        destroyed ||
+                        !timeContext
+                    ) {
+                        return;
+                    }
+
+                    /*
+                     * Remove an existing subscription first.
+                     */
+                    if (
+                        typeof unsubscribe ===
+                        "function"
+                    ) {
+                        unsubscribe();
+                        unsubscribe = null;
+                    }
+
+                    const timeSystem =
+                        timeContext.getTimeSystem();
+
+                    if (!timeSystem) {
+                        return;
+                    }
+
+                    /*
+                     * Open MCT's realtime callback supplies one actual
+                     * telemetry datum at a time.
+                     */
+                    unsubscribe =
+                        openmct.telemetry.subscribe(
+                            domainObject,
+                            (datum) => {
+                                if (
+                                    destroyed
+                                ) {
+                                    return;
+                                }
+
+                                const added =
+                                    addDatum(
+                                        datum
+                                    );
+
+                                if (!added) {
+                                    return;
+                                }
+
+                                const bounds =
+                                    timeContext.getBounds();
+
+                                if (
+                                    bounds &&
+                                    Number.isFinite(
+                                        bounds.start
+                                    ) &&
+                                    Number.isFinite(
+                                        bounds.end
+                                    )
+                                ) {
+                                    /*
+                                     * Realtime data extends our known
+                                     * coverage.
+                                     */
+                                    const sample =
+                                        parseDatum(
+                                            datum
+                                        );
+
+                                    if (
+                                        sample
+                                    ) {
+                                        if (
+                                            loadedEnd ===
+                                                null ||
+                                            sample.timestamp >
+                                                loadedEnd
+                                        ) {
+                                            loadedEnd =
+                                                sample.timestamp;
+                                        }
+
+                                        if (
+                                            loadedStart ===
+                                                null
+                                        ) {
+                                            loadedStart =
+                                                sample.timestamp;
+                                        }
+                                    }
+
+                                    pruneBuffer(
+                                        bounds.start,
+                                        bounds.end
+                                    );
+                                }
+
+                                requestRender();
+                            },
+                            {
+                                domain:
+                                    timeSystem.key
+                            }
+                        );
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Time system change
+                 * --------------------------------------------------------
+                 */
+
+                function resetForTimeSystem() {
+                    /*
+                     * Timestamps can mean something different under a new
+                     * time system, so do not mix the old and new data.
+                     */
+                    samplesByTime.clear();
+
+                    loadedStart = null;
+                    loadedEnd = null;
+
+                    yMin = null;
+                    yMax = null;
+
+                    updateMetadata();
+
+                    subscribeRealtime();
+
+                    requestHistorical(
+                        true
+                    );
+
+                    requestRender();
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Bounds changed
+                 * --------------------------------------------------------
+                 */
+
+                function boundsChanged() {
+                    if (destroyed) {
+                        return;
+                    }
+
+                    /*
+                     * If the new window is already covered by our buffer,
+                     * this is just a visual scroll.
+                     *
+                     * Otherwise fetch the missing historical interval.
+                     */
+                    requestHistorical(false);
+
+                    requestRender();
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Rendering
+                 * --------------------------------------------------------
+                 */
+
+                function requestRender() {
+                    if (
+                        destroyed ||
+                        renderFrame !== null
+                    ) {
+                        return;
+                    }
+
+                    renderFrame =
+                        window.requestAnimationFrame(
+                            render
+                        );
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Canvas resize
+                 * --------------------------------------------------------
+                 */
+
+                function resizeCanvas() {
+                    if (
+                        destroyed ||
+                        !canvas ||
+                        !ctx
+                    ) {
+                        return;
+                    }
+
+                    const rect =
+                        canvas.getBoundingClientRect();
+
+                    const width =
+                        Math.max(
+                            1,
+                            rect.width
+                        );
+
+                    const height =
+                        Math.max(
+                            1,
+                            rect.height
+                        );
+
+                    const dpr =
+                        window.devicePixelRatio ||
+                        1;
+
+                    canvas.width =
+                        Math.max(
+                            2,
+                            Math.round(
+                                width * dpr
+                            )
+                        );
+
+                    canvas.height =
+                        Math.max(
+                            2,
+                            Math.round(
+                                height * dpr
+                            )
+                        );
+
+                    ctx.setTransform(
+                        dpr,
+                        0,
+                        0,
+                        dpr,
+                        0,
+                        0
+                    );
+
+                    requestRender();
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Draw background
+                 * --------------------------------------------------------
+                 */
+
+                function drawBackground(
+                    width,
+                    height
+                ) {
+                    ctx.clearRect(
+                        0,
+                        0,
+                        width,
+                        height
+                    );
+
+                    ctx.fillStyle =
+                        bgColor;
+
+                    ctx.fillRect(
+                        0,
+                        0,
+                        width,
+                        height
+                    );
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * Render actual samples
+                 * --------------------------------------------------------
+                 */
+
+                function render() {
+                    renderFrame = null;
+
+                    if (
+                        destroyed ||
+                        !canvas ||
+                        !ctx ||
+                        !timeContext
+                    ) {
+                        return;
+                    }
+
+                    const dpr =
+                        window.devicePixelRatio ||
+                        1;
+
+                    const width =
+                        canvas.width / dpr;
+
+                    const height =
+                        canvas.height / dpr;
+
+                    if (
+                        width <= 0 ||
+                        height <= 0
+                    ) {
+                        return;
+                    }
+
+                    drawBackground(
+                        width,
+                        height
+                    );
+
+                    const bounds =
+                        timeContext.getBounds();
+
+                    if (
+                        !bounds ||
+                        !Number.isFinite(
+                            bounds.start
+                        ) ||
+                        !Number.isFinite(
+                            bounds.end
+                        ) ||
+                        bounds.end <=
+                            bounds.start
+                    ) {
+                        return;
+                    }
+
+                    /*
+                     * Metadata should normally have established these.
+                     */
+                    if (
+                        !Number.isFinite(yMin) ||
+                        !Number.isFinite(yMax)
+                    ) {
+                        updateMetadata();
+                    }
+
+                    /*
+                     * Last-resort fallback only.
+                     *
+                     * This is NOT recalculated every frame.
+                     */
+                    if (
+                        !Number.isFinite(yMin) ||
+                        !Number.isFinite(yMax)
+                    ) {
+                        const all =
+                            getOrderedSamples();
+
+                        if (all.length) {
+                            let min =
+                                Infinity;
+
+                            let max =
+                                -Infinity;
+
+                            for (
+                                let i = 0;
+                                i < all.length;
+                                i += 1
+                            ) {
+                                min =
+                                    Math.min(
+                                        min,
+                                        all[i].value
+                                    );
+
+                                max =
+                                    Math.max(
+                                        max,
+                                        all[i].value
+                                    );
+                            }
+
+                            if (
+                                Number.isFinite(
+                                    min
+                                ) &&
+                                Number.isFinite(
+                                    max
+                                )
+                            ) {
+                                if (
+                                    min === max
+                                ) {
+                                    const padding =
+                                        Math.abs(
+                                            min
+                                        ) *
+                                            0.05 ||
+                                        1;
+
+                                    min -=
+                                        padding;
+
+                                    max +=
+                                        padding;
+                                }
+
+                                yMin = min;
+                                yMax = max;
+                            }
+                        }
+                    }
+
+                    if (
+                        !Number.isFinite(yMin) ||
+                        !Number.isFinite(yMax) ||
+                        yMax <= yMin
+                    ) {
+                        return;
+                    }
+
+                    const timeStart =
+                        bounds.start;
+
+                    const timeEnd =
+                        bounds.end;
+
+                    const timeRange =
+                        timeEnd -
+                        timeStart;
+
+                    const valueRange =
+                        yMax -
+                        yMin;
+
+                    /*
+                     * Get the real telemetry samples.
+                     */
+                    const allSamples =
+                        getOrderedSamples();
+
+                    /*
+                     * Only draw samples in the active time window.
+                     */
+                    const visible =
+                        [];
+
+                    for (
+                        let i = 0;
+                        i <
+                        allSamples.length;
+                        i += 1
+                    ) {
+                        const sample =
+                            allSamples[i];
+
+                        if (
+                            sample.timestamp >=
+                                timeStart &&
+                            sample.timestamp <=
+                                timeEnd
+                        ) {
+                            visible.push(
+                                sample
+                            );
+                        }
+                    }
+
+                    if (
+                        visible.length < 2
+                    ) {
+                        return;
+                    }
+
+                    /*
+                     * ----------------------------------------------------
+                     * Optional rendering decimation
+                     * ----------------------------------------------------
+                     *
+                     * Only activate this if the telemetry provider is
+                     * delivering far more samples than the canvas can
+                     * physically display.
+                     *
+                     * This is deliberately NOT min/max decimation.
+                     * We simply choose actual samples at regular positions.
+                     */
+                    let drawSamples =
+                        visible;
+
+                    const renderLimit =
+                        Math.max(
+                            width * 4,
+                            2000
+                        );
+
+                    if (
+                        visible.length >
+                        renderLimit
+                    ) {
+                        const reduced =
+                            [];
+
+                        const step =
+                            (visible.length -
+                                1) /
+                            (renderLimit -
+                                1);
+
+                        for (
+                            let i = 0;
+                            i <
+                            renderLimit;
+                            i += 1
+                        ) {
+                            reduced.push(
+                                visible[
+                                    Math.round(
+                                        i *
+                                            step
+                                    )
+                                ]
+                            );
+                        }
+
+                        drawSamples =
+                            reduced;
+                    }
+
+                    /*
+                     * ----------------------------------------------------
+                     * Draw waveform
+                     * ----------------------------------------------------
+                     *
+                     * This is deliberately boring.
+                     *
+                     * Timestamp -> X
+                     * Value     -> Y
+                     *
+                     * Connect actual samples.
+                     */
+                    ctx.beginPath();
+
+                    let started =
+                        false;
+
+                    for (
+                        let i = 0;
+                        i <
+                        drawSamples.length;
+                        i += 1
+                    ) {
+                        const sample =
+                            drawSamples[i];
+
+                        let x =
+                            ((sample.timestamp -
+                                timeStart) /
+                                timeRange) *
+                            width;
+
+                        let normalizedY =
+                            (sample.value -
+                                yMin) /
+                            valueRange;
+
+                        /*
+                         * Do not modify the telemetry value.
+                         * Only constrain its screen position.
+                         */
+                        x = Math.max(
+                            0,
+                            Math.min(
+                                width,
+                                x
+                            )
+                        );
+
+                        normalizedY =
+                            Math.max(
+                                0,
+                                Math.min(
+                                    1,
+                                    normalizedY
+                                )
+                            );
+
+                        const y =
+                            height -
+                            normalizedY *
+                                height;
+
+                        if (!started) {
+                            ctx.moveTo(
+                                x,
+                                y
+                            );
+
+                            started =
+                                true;
+                        } else {
+                            ctx.lineTo(
+                                x,
+                                y
+                            );
+                        }
+                    }
+
+                    if (!started) {
+                        return;
+                    }
+
+                    /*
+                     * Main line.
+                     */
+                    ctx.lineWidth =
+                        lineWidth;
+
+                    ctx.strokeStyle =
+                        lineColor;
+
+                    ctx.lineJoin =
+                        "round";
+
+                    ctx.lineCap =
+                        "round";
+
+                    ctx.stroke();
+
+                    /*
+                     * Very subtle glow.
+                     */
+                    ctx.save();
+
+                    ctx.globalCompositeOperation =
+                        "lighter";
+
+                    ctx.globalAlpha =
+                        0.045;
+
+                    ctx.lineWidth =
+                        lineWidth * 3;
+
+                    ctx.strokeStyle =
+                        lineColor;
+
+                    ctx.stroke();
+
+                    ctx.restore();
+                }
+
+                /*
+                 * --------------------------------------------------------
+                 * View lifecycle
+                 * --------------------------------------------------------
+                 */
+
+                return {
+                    show(el) {
+                        destroyed = false;
+
+                        /*
+                         * TimeContext for this view.
+                         */
+                        timeContext =
+                            openmct.time.getContextForView(
+                                objectPath
+                            );
+
+                        if (!timeContext) {
+                            throw new Error(
+                                "Astonishing Sparkline: unable to obtain Open MCT TimeContext."
+                            );
+                        }
+
+                        updateMetadata();
+
+                        if (!rangeMetadata) {
+                            throw new Error(
+                                `Astonishing Sparkline requires a telemetry value with a "range" hint for ${domainObject.name}.`
+                            );
+                        }
+
+                        /*
+                         * ------------------------------------------------
+                         * DOM
+                         * ------------------------------------------------
+                         */
+
+                        containerEl =
+                            document.createElement(
+                                "div"
+                            );
+
+                        containerEl.className =
+                            "astonishing-sparkline-container";
+
+                        const header =
+                            document.createElement(
+                                "div"
+                            );
+
+                        header.className =
+                            "astonishing-sparkline-header";
+
+                        header.textContent =
+                            options.title ||
+                            "Astonishing Sparkline";
+
+                        containerEl.appendChild(
+                            header
+                        );
+
+                        canvas =
+                            document.createElement(
+                                "canvas"
+                            );
+
+                        canvas.className =
+                            "astonishing-sparkline-canvas";
+
+                        containerEl.appendChild(
+                            canvas
+                        );
+
+                        el.appendChild(
+                            containerEl
+                        );
+
+                        ctx =
+                            canvas.getContext(
+                                "2d"
+                            );
+
+                        if (!ctx) {
+                            throw new Error(
+                                "Astonishing Sparkline: unable to create canvas."
+                            );
+                        }
+
+                        /*
+                         * ------------------------------------------------
+                         * Resize
+                         * ------------------------------------------------
+                         */
+
+                        if (
+                            typeof ResizeObserver !==
+                            "undefined"
+                        ) {
+                            resizeObserver =
+                                new ResizeObserver(
+                                    resizeCanvas
+                                );
+
+                            resizeObserver.observe(
+                                canvas
+                            );
+                        } else {
+                            window.addEventListener(
+                                "resize",
+                                resizeCanvas
+                            );
+                        }
+
+                        resizeCanvas();
+
+                        /*
+                         * ------------------------------------------------
+                         * Realtime subscription
+                         * ------------------------------------------------
+                         */
+
+                        subscribeRealtime();
+
+                        /*
+                         * ------------------------------------------------
+                         * Historical request
+                         * ------------------------------------------------
+                         */
+
+                        requestHistorical(true);
+
+                        /*
+                         * ------------------------------------------------
+                         * Time events
+                         * ------------------------------------------------
+                         */
+
+                        timeContext.on(
+                            "boundsChanged",
+                            boundsChanged
+                        );
+
+                        timeContext.on(
+                            "timeSystemChanged",
+                            resetForTimeSystem
+                        );
+
+                        requestRender();
+                    },
+
+                    destroy() {
+                        if (destroyed) {
+                            return;
+                        }
+
+                        destroyed = true;
+
+                        /*
+                         * Rendering.
+                         */
+                        if (
+                            renderFrame !== null
+                        ) {
+                            window.cancelAnimationFrame(
+                                renderFrame
+                            );
+
+                            renderFrame =
+                                null;
+                        }
+
+                        /*
+                         * Resize.
+                         */
+                        if (
+                            resizeObserver
+                        ) {
+                            resizeObserver.disconnect();
+
+                            resizeObserver =
+                                null;
+                        } else {
+                            window.removeEventListener(
+                                "resize",
+                                resizeCanvas
+                            );
+                        }
+
+                        /*
+                         * Time.
+                         */
+                        if (timeContext) {
+                            timeContext.off(
+                                "boundsChanged",
+                                boundsChanged
+                            );
+
+                            timeContext.off(
+                                "timeSystemChanged",
+                                resetForTimeSystem
+                            );
+                        }
+
+                        /*
+                         * Realtime.
+                         */
+                        if (
+                            typeof unsubscribe ===
+                            "function"
+                        ) {
+                            unsubscribe();
+
+                            unsubscribe =
+                                null;
+                        }
+
+                        /*
+                         * Invalidate outstanding historical requests.
+                         */
+                        requestSerial += 1;
+
+                        requestInProgress =
+                            false;
+
+                        /*
+                         * Data.
+                         */
+                        samplesByTime.clear();
+
+                        loadedStart =
+                            null;
+
+                        loadedEnd =
+                            null;
+
+                        /*
+                         * DOM.
+                         */
+                        if (
+                            containerEl &&
+                            containerEl.parentNode
+                        ) {
+                            containerEl.parentNode.removeChild(
+                                containerEl
+                            );
+                        }
+
+                        containerEl =
+                            null;
+
+                        canvas =
+                            null;
+
+                        ctx =
+                            null;
+
+                        /*
+                         * Metadata.
+                         */
+                        timeContext =
+                            null;
+
+                        metadata =
+                            null;
+
+                        formatMap =
+                            null;
+
+                        rangeMetadata =
+                            null;
+
+                        timeMetadata =
+                            null;
+
+                        yMin =
+                            null;
+
+                        yMax =
+                            null;
+                    }
+                };
             }
-
-            containerEl = document.createElement("div");
-            containerEl.className = "astonishing-sparkline-container";
-
-            const header = document.createElement("div");
-            header.className = "astonishing-sparkline-header";
-            header.innerText = options.title || "Astonishing Sparkline";
-
-            containerEl.appendChild(header);
-
-            canvas = document.createElement("canvas");
-            canvas.className = "astonishing-sparkline-canvas";
-
-            containerEl.appendChild(canvas);
-            el.appendChild(containerEl);
-
-            ctx = canvas.getContext("2d");
-
-            resizeCanvas();
-
-            window.addEventListener("resize", resizeCanvas);
-
-            /*
-             * TelemetryCollection combines:
-             *
-             *   1. the historical request for the current time window;
-             *   2. the realtime subscription;
-             *   3. reaction to TimeContext bounds changes;
-             *   4. reaction to TimeContext time-system changes.
-             *
-             * minmax is appropriate for a plot because it asks telemetry
-             * providers for a reduced representation while retaining the
-             * extrema needed to represent the signal faithfully.
-             */
-            telemetryCollection = openmct.telemetry.requestCollection(
-              domainObject,
-              {
-                timeContext,
-                strategy: "minmax",
-                size: maxSamples,
-              },
-            );
-
-            telemetryCollection.on("add", telemetryChanged);
-            telemetryCollection.on("remove", telemetryChanged);
-            telemetryCollection.on("clear", telemetryChanged);
-
-            timeContext.on("timeSystemChanged", timeSystemChanged);
-
-            /*
-             * load() starts the historical request and realtime subscription.
-             * Historical telemetry therefore populates the sparkline on load.
-             */
-            telemetryCollection.load();
-
-            // Render the empty state immediately. Subsequent renders are
-            // triggered by telemetry collection events.
-            requestRender();
-          },
-
-          destroy() {
-            if (destroyed) {
-              return;
-            }
-
-            destroyed = true;
-
-            if (renderFrame !== null) {
-              window.cancelAnimationFrame(renderFrame);
-              renderFrame = null;
-            }
-
-            window.removeEventListener("resize", resizeCanvas);
-
-            if (timeContext) {
-              timeContext.off("timeSystemChanged", timeSystemChanged);
-            }
-
-            if (telemetryCollection) {
-              telemetryCollection.off("add", telemetryChanged);
-              telemetryCollection.off("remove", telemetryChanged);
-              telemetryCollection.off("clear", telemetryChanged);
-              telemetryCollection.destroy();
-              telemetryCollection = null;
-            }
-
-            if (containerEl && containerEl.parentNode) {
-              containerEl.parentNode.removeChild(containerEl);
-            }
-
-            containerEl = null;
-            canvas = null;
-            ctx = null;
-            timeContext = null;
-            metadata = null;
-            formatMap = null;
-            rangeMetadata = null;
-          },
-        };
-      },
-    });
-  };
+        });
+    };
 }
