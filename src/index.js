@@ -5,11 +5,10 @@ import astonishingSparkline from './plugins/astonishing-sparkline.js';
 (() => {
   const THIRTY_MINUTES = 30 * 60 * 1000;
 
-  // 1. Instalar primero todos los plugins base del sistema
   installDefaultPlugins();
   openmct.install(installHelloPlugin());
   
-  // 2. INSTALAR TU SPARKLINE (Esto faltaba en tu código)
+  
   openmct.install(astonishingSparkline({
     maxSamples: 300,
     bgColor: "#0b1020",
@@ -18,7 +17,7 @@ import astonishingSparkline from './plugins/astonishing-sparkline.js';
     title: "Mi Sparkline NASA"
   }));
 
-  // 3. Configurar el Conductor de tiempo
+  
   openmct.install(
     openmct.plugins.Conductor({
       menuOptions: [
@@ -42,8 +41,7 @@ import astonishingSparkline from './plugins/astonishing-sparkline.js';
       ],
     }),
   );
-
-  // 4. Arrancar Open MCT SIEMPRE al final de todo el flujo de configuración
+  
   document.addEventListener("DOMContentLoaded", function () {
     openmct.start();
   });
@@ -52,7 +50,7 @@ import astonishingSparkline from './plugins/astonishing-sparkline.js';
     openmct.install(openmct.plugins.LocalStorage());
     openmct.install(openmct.plugins.MyItems());
     openmct.install(openmct.plugins.Espresso());
-    openmct.install(openmct.plugins.example.Generator()); // <-- ESTE OBJETO TE SERVIRÁ PARA PROBARLO
+    openmct.install(openmct.plugins.example.Generator());
     openmct.install(openmct.plugins.example.ExampleImagery());
     openmct.install(openmct.plugins.UTCTimeSystem());
     openmct.install(openmct.plugins.TelemetryMean());
