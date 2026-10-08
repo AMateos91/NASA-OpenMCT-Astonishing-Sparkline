@@ -14,7 +14,7 @@ import astonishingSparkline from './plugins/astonishing-sparkline.js';
     bgColor: "#0b1020",
     lineColor: "#00e0a3",
     lineWidth: 2,
-    title: "Mi Sparkline NASA"
+    title: "NASA Sparkline"
   }));
 
   
