@@ -1203,23 +1203,6 @@ export default function astonishingSparkline(options = {}) {
                  *
                  * An enum is not a continuous mathematical measurement.
                  *
-                 * If the telemetry changes:
-                 *
-                 *     OFF -> ON
-                 *
-                 * we draw:
-                 *
-                 *     ─────────┐
-                 *              │
-                 *              └─────────
-                 *
-                 * NOT:
-                 *
-                 *     ───────╱
-                 *           ╱
-                 *         ╱
-                 *
-                 * and certainly not a sine wave.
                  */
 
                 function renderState(
