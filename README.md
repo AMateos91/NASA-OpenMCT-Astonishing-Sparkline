@@ -1,37 +1,72 @@
-# Open MCT Plugin Template
+# NASA Open MCT Astonishing Sparkline Plugin
 
-This is a template for developing plugins for [Open MCT](https://github.com/nasa/openmct). It includes example plugins demonstrating basic usage of the Open MCT API for requesting, subscribing to, and displaying data. This document is a work in progress and will be updated with more examples and guidance.
+An external plugin for [NASA Open MCT](https://github.com/nasa/openmct) that introduces a telemetry-driven sparkline plotting visualization component. This plugin extends Open MCT's core visualization capabilities by providing compact, high-density inline charts designed for rapid situational awareness in mission control environments.
 
-## Table of Contents
+## Table of contents
 
-- [Setup](#setup)
-- [Examples](#examples)
-  - [Simple LAD Table](#simple-lad-table)
-  - [Simple Telemetry Table (WIP)](#simple-telemetry-table-wip)
-- [TODO](#todo)
+- [Features](#features)
+- [Setup & Installation](#setup--installation)
+- [Usage & Architecture](#usage--architecture)
+- [Automated Testing](#automated-testing)
+- [License](#license)
 
-## Setup
+## Features
 
-1. Ensure [nvm](https://github.com/nvm-sh/nvm#installing-and-updating) is installed.
-2. Open a terminal at the project root and run `nvm install` to install the node version specified in `.nvmrc`.
-3. Use `nvm use` to switch to the correct node version.
-4. Install dependencies with `npm install`.
-5. Start the development server with `npm start`.
-6. To build for production, run `npm run build`.
+- **Real-time sparklines:** Subscribes to real-time telemetry streams using the Open MCT Telemetry API to render instantaneous trend updates.
+- **Historical data plotting:** Requests and populates historical telemetry intervals to provide immediate context upon layout initialization.
+- **High performance:** Optimized for multi-signal tracking dashboards without degrading dashboard UI responsiveness.
 
-## Examples
+## Setup & Installation
 
-### Simple LAD Table
+Follow these steps to run the plugin development server locally or package it for production:
 
-A simplified version of a LAD Table that displays the latest value for a given parameter. Demonstrates how to use `TelemetryCollection` for data subscription and `CompositionCollection` for parameter management in a table.
+1. **Node environment:** Ensure `nvm` (Node Version Manager) is installed on your system.
+2. **Version matching:** Open a terminal at the project root directory and run:
+   ```bash
+   nvm install
+   nvm use
+   ```
+   *This automatically locks into the proper Node.js version specified in the project's `.nvmrc` file.*
+3. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+4. **Local development:** Run the local development server with hot-reloading:
+   ```bash
+   npm start
+   ```
+5. **Production build:** Compile and minify the sparkline plugin artifact for distribution:
+   ```bash
+   npm run build
+   ```
 
-### Simple Telemetry Table (WIP)
+## Usage & Architecture
 
-A work-in-progress example showing how to use `TelemetryCollection` for requesting historical data and subscribing to the latest parameter values.
+The plugin interfaces directly with the Open MCT API layer. It showcases advanced implementation patterns for:
+- **TelemetryCollection:** Manages real-time data subscriptions and triggers sub-second graph redraws.
+- **CompositionCollection:** Dynamically hooks into parameter dictionaries and dictionary layouts.
 
-## TODO
+To integrate this visualization into an Open MCT application instance, import the build distribution file and register it inside your main application configuration sequence:
 
-- [x] - Example plugin for displaying realtime (latest) data.
-- [ ] - Example plugin to display historical data.
-- [ ] - Updated guidance for unit testing.
-- [ ] - Demonstrate usage of `openmct-e2e` for testing.
+```javascript
+import OpenMCTSparklinePlugin from 'nasa-openmct-astonishing-sparkline';
+
+openmct.install(OpenMCTSparklinePlugin());
+```
+
+## Automated testing
+
+The project includes an end-to-end (E2E) testing suite engineered for Open MCT plugin infrastructure:
+
+- **E2E test execution:** Run the automated browser verification suites locally via:
+  ```bash
+  npm run test:e2e:ci
+  ```
+- **Visual regression testing:** Validate component rendering integrity across design iterations:
+  ```bash
+  npm run test:e2e:visual
+  ```
+
+## License
+
+This project is licensed under the Apache License 2.0. See the `LICENSE` file for the full legal text.
